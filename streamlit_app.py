@@ -14,6 +14,37 @@ from datetime import datetime
 from urllib.parse import urlparse
 from typing import Literal
 import io
+import subprocess
+import sys
+
+
+# =============================================================================
+# АВТОМАТИЧЕСКАЯ УСТАНОВКА БРАУЗЕРА (для Streamlit Cloud)
+# =============================================================================
+
+def install_playwright_browsers():
+    """Устанавливает браузеры Playwright при первом запуске."""
+    try:
+        with sync_playwright() as p:
+            # Проверяем, установлен ли браузер
+            p.chromium.launch(headless=True).close()
+    except Exception:
+        # Если браузер не установлен, устанавливаем его
+        st.warning("📦 Установка браузера Chromium... Это может занять минуту.")
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                check=True,
+                capture_output=True
+            )
+            st.success("✅ Браузер установлен!")
+        except subprocess.CalledProcessError as e:
+            st.error(f"❌ Ошибка установки браузера: {e}")
+            st.stop()
+
+
+# Устанавливаем браузер при запуске
+install_playwright_browsers()
 
 
 # =============================================================================
