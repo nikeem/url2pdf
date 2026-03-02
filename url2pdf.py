@@ -8,15 +8,146 @@ URL2PDF — Конвертер веб-страниц в PDF.
 
 Пример использования:
     python url2pdf.py https://example.com --full-page -o output.pdf
-
-Автор: URL2PDF Project
-Лицензия: MIT
 """
+
+from __future__ import annotations
 
 import click
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 from pathlib import Path
 from datetime import datetime
+from urllib.parse import urlparse
+from typing import Literal
+
+
+# =============================================================================
+# КОНСТАНТЫ
+# =============================================================================
+
+# A4 размеры при 96 DPI (для viewport)
+A4_PORTRAIT: dict[str, int] = {'width': 794, 'height': 1123}
+A4_LANDSCAPE: dict[str, int] = {'width': 1123, 'height': 794}
+
+# A4 в пунктах при 72 DPI (для PDF)
+A4_WIDTH_PT: int = 595
+MARGIN_05CM_PT: int = 38  # ~0.5cm в пикселях при 72 DPI
+
+# Стандартный desktop viewport
+DESKTOP_VIEWPORT: dict[str, int] = {'width': 1920, 'height': 1080}
+
+# Настройки безопасности
+ALLOWED_SCHEMES: set[str] = {'http', 'https'}
+BLOCKED_HOSTS: set[str] = {'localhost', '127.0.0.1', '0.0.0.0', '::1'}
+
+# CSS для сохранения фонов при печати
+PRINT_CSS: str = '''
+    * {
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+        color-adjust: exact !important;
+    }
+    body {
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }
+'''
+
+# Таймаут ожидания сети (по умолчанию)
+NETWORK_IDLE_TIMEOUT_MS: int = 15000
+
+# Задержка для загрузки изображений по умолчанию
+DEFAULT_IMAGE_TIMEOUT_MS: int = 8000
+
+
+# =============================================================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# =============================================================================
+
+def validate_url(url: str) -> None:
+    """
+    Валидация URL для защиты от SSRF.
+
+    Args:
+        url: Проверяемый URL
+
+    Raises:
+        ValueError: Если URL имеет недопустимую схему или хост
+    """
+    parsed = urlparse(url)
+
+    if parsed.scheme not in ALLOWED_SCHEMES:
+        raise ValueError(
+            f"Недопустимая схема URL: '{parsed.scheme}'. "
+            f"Разрешены только: {', '.join(ALLOWED_SCHEMES)}"
+        )
+
+    if parsed.hostname in BLOCKED_HOSTS:
+        raise ValueError(
+            f"Заблокированный хост: '{parsed.hostname}'. "
+            f"Доступ к внутренним ресурсам запрещён."
+        )
+
+
+def build_pdf_options(
+    format: Literal['A4', 'Letter', 'Legal', 'Tabloid'],
+    landscape: bool,
+    print_background: bool,
+    margins: dict[str, str],
+    scale: float,
+    full_page: bool,
+) -> dict:
+    """
+    Собирает опции для генерации PDF.
+
+    Args:
+        format: Формат бумаги
+        landscape: Альбомная ориентация
+        print_background: Печатать фоны
+        margins: Словарь с полями страницы
+        scale: Масштаб
+        full_page: Режим полной страницы
+
+    Returns:
+        Словарь с опциями для page.pdf()
+    """
+    options: dict = {
+        'format': format,
+        'landscape': landscape,
+        'margin': margins,
+        'scale': scale,
+    }
+
+    if full_page:
+        options.update({
+            'print_background': True,
+            'prefer_css_page_size': True,
+            'display_header_footer': False,
+            'tagged': True,
+        })
+    else:
+        options['print_background'] = print_background
+
+    return options
+
+
+def calculate_scale(content_width: int, scale: float) -> float:
+    """
+    Вычисляет масштаб для вписывания контента в A4.
+
+    Args:
+        content_width: Ширина контента в пикселях
+        scale: Текущий масштаб (0.0 = авто)
+
+    Returns:
+        Вычисленный масштаб
+    """
+    available_width = A4_WIDTH_PT - (MARGIN_05CM_PT * 2)
+
+    if content_width > available_width:
+        return available_width / content_width
+    elif scale == 0.0:
+        return 1.0
+    return scale
 
 
 # =============================================================================
@@ -95,16 +226,34 @@ from datetime import datetime
     help='Таймаут загрузки страницы в мс (по умолчанию: 60000 = 60 сек)'
 )
 @click.option(
+    '--image-timeout',
+    type=int,
+    default=DEFAULT_IMAGE_TIMEOUT_MS,
+    help=f'Время ожидания загрузки изображений в мс (по умолчанию: {DEFAULT_IMAGE_TIMEOUT_MS})'
+)
+@click.option(
     '--hide-selectors',
     type=str,
     multiple=True,
     help='CSS-селекторы элементов для скрытия (можно указывать несколько раз)'
 )
 def url2pdf(
-    url, output, wait, full_page, landscape, format,
-    print_background, margin_top, margin_bottom,
-    margin_left, margin_right, scale, timeout, hide_selectors
-):
+    url: str,
+    output: str | None,
+    wait: int,
+    full_page: bool,
+    landscape: bool,
+    format: Literal['A4', 'Letter', 'Legal', 'Tabloid'],
+    print_background: bool,
+    margin_top: str,
+    margin_bottom: str,
+    margin_left: str,
+    margin_right: str,
+    scale: float,
+    timeout: int,
+    image_timeout: int,
+    hide_selectors: tuple[str, ...],
+) -> None:
     """
     Конвертирует URL в PDF-файл.
 
@@ -127,120 +276,86 @@ def url2pdf(
         # Скрыть рекламу
         python url2pdf.py https://example.com --hide-selectors ".ad-banner"
     """
-    # ---------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # ВАЛИДАЦИЯ URL (SSRF защита)
+    # -------------------------------------------------------------------------
+    try:
+        validate_url(url)
+    except ValueError as e:
+        click.echo(f"❌ Ошибка валидации URL: {e}", err=True)
+        raise click.Abort()
+
+    # -------------------------------------------------------------------------
     # ПОДГОТОВКА: генерация имени файла и пути
-    # ---------------------------------------------------------------------
+    # -------------------------------------------------------------------------
     if not output:
-        # Если имя файла не указано, генерируем по текущей дате/времени
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         output = f"{timestamp}.pdf"
 
-    # Преобразуем в абсолютный путь для надёжности
     output_path = Path(output).resolve()
 
-    # Выводим информацию о задаче
     click.echo(f"📄 Конвертация URL в PDF...")
     click.echo(f"   URL: {url}")
     click.echo(f"   Выход: {output_path}")
 
-    # ---------------------------------------------------------------------
+    # -------------------------------------------------------------------------
     # ЗАПУСК BROWSER: инициализация Playwright и Chromium
-    # ---------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    browser = None  # Инициализируем для finally
+
     with sync_playwright() as p:
-        # Запускаем Chromium в headless-режиме (без графического интерфейса)
-        browser = p.chromium.launch(headless=True)
-
-        # Создаём новую страницу с viewport по умолчанию
-        page = browser.new_page(viewport={'width': 1920, 'height': 1080})
-
         try:
-            # -------------------------------------------------------------
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page(viewport=DESKTOP_VIEWPORT)
+
+            # -----------------------------------------------------------------
             # ЗАГРУЗКА СТРАНИЦЫ
-            # -------------------------------------------------------------
+            # -----------------------------------------------------------------
             click.echo(f"   Загрузка страницы...")
 
             # Устанавливаем viewport в соответствии с режимом
-            # Для full-page используем размеры, близкие к A4, чтобы сайт
-            # рендерился в правильном масштабе
             if full_page and not landscape:
-                # Портретный A4: 794 x 1123 пикселей при 96 DPI
-                page.set_viewport_size({'width': 794, 'height': 1123})
+                page.set_viewport_size(A4_PORTRAIT)
             elif full_page and landscape:
-                # Альбомный A4: 1123 x 794 пикселей
-                page.set_viewport_size({'width': 1123, 'height': 794})
+                page.set_viewport_size(A4_LANDSCAPE)
             else:
-                # Стандартный desktop viewport
-                page.set_viewport_size({'width': 1920, 'height': 1080})
+                page.set_viewport_size(DESKTOP_VIEWPORT)
 
-            # -------------------------------------------------------------
+            # -----------------------------------------------------------------
             # CSS ДЛЯ ПЕЧАТИ: принудительное отображение фонов
-            # -------------------------------------------------------------
-            # Добавляем CSS для сохранения фоновых изображений и цветов
-            # при печати. По умолчанию браузеры экономят краску и убирают фоны.
-            page.add_style_tag(content='''
-                * {
-                    -webkit-print-color-adjust: exact !important;
-                    print-color-adjust: exact !important;
-                    color-adjust: exact !important;
-                }
-                body {
-                    -webkit-print-color-adjust: exact !important;
-                    print-color-adjust: exact !important;
-                }
-            ''')
-
-            # Эмулируем media='screen' вместо 'print' для сохранения
-            # визуального стиля страницы (фонов, градиентов и т.д.)
+            # -----------------------------------------------------------------
+            page.add_style_tag(content=PRINT_CSS)
             page.emulate_media(media='screen')
 
-            # -------------------------------------------------------------
+            # -----------------------------------------------------------------
             # НАВИГАЦИЯ И ЗАГРУЗКА КОНТЕНТА
-            # -------------------------------------------------------------
-            # Загружаем страницу, ждём DOMContentLoaded (быстрее чем full load)
+            # -----------------------------------------------------------------
             page.goto(url, wait_until='domcontentloaded', timeout=timeout)
 
-            # Ждём networkidle (все сетевые запросы завершены)
-            # с отдельным таймаутом, чтобы не блокировать основную загрузку
             try:
-                page.wait_for_load_state('networkidle', timeout=15000)
+                page.wait_for_load_state('networkidle', timeout=NETWORK_IDLE_TIMEOUT_MS)
             except PlaywrightTimeout:
                 click.echo(f"   ⚠️  Таймаут ожидания сети, продолжаем...")
 
-            # -------------------------------------------------------------
+            # -----------------------------------------------------------------
             # ОЖИДАНИЕ ЗАГРУЗКИ ИЗОБРАЖЕНИЙ
-            # -------------------------------------------------------------
-            # Критически важно для страниц с ленивой загрузкой (lazy loading)
-            # 8 секунд достаточно для большинства современных сайтов
-            click.echo(f"   Ожидание загрузки изображений (8 сек)...")
-            page.wait_for_timeout(8000)
+            # -----------------------------------------------------------------
+            click.echo(f"   Ожидание загрузки изображений ({image_timeout // 1000} сек)...")
+            page.wait_for_timeout(image_timeout)
 
-            # -------------------------------------------------------------
+            # -----------------------------------------------------------------
             # АВТО-МАСШТАБИРОВАНИЕ
-            # -------------------------------------------------------------
-            # Получаем реальную ширину контента страницы
+            # -----------------------------------------------------------------
             content_width = page.evaluate('() => document.documentElement.scrollWidth')
             click.echo(f"   Ширина контента: {content_width}px")
 
-            # Вычисляем доступную ширину A4 (595 точек при 72 DPI)
-            # с учётом полей (0.5cm ≈ 38 пикселей)
-            a4_width_px = 595
-            margin_px = 38  # ~0.5cm в пикселях при 72 DPI
-            available_width = a4_width_px - (margin_px * 2)
+            scale = calculate_scale(content_width, scale)
+            if content_width > A4_WIDTH_PT - (MARGIN_05CM_PT * 2):
+                click.echo(f"   Авто-масштаб: {scale:.2f}")
 
-            # Авто-подбор масштаба: если контент шире доступного места,
-            # уменьшаем масштаб для вписывания в A4
-            if content_width > available_width:
-                auto_scale = available_width / content_width
-                click.echo(f"   Авто-масштаб: {auto_scale:.2f} (контент {content_width}px > доступного {available_width}px)")
-                scale = auto_scale
-            elif scale == 0.0:
-                # Если масштаб не указан и контент влезает — используем 1.0
-                scale = 1.0
-
-            # -------------------------------------------------------------
+            # -----------------------------------------------------------------
             # СКРЫТИЕ ЭЛЕМЕНТОВ
-            # -------------------------------------------------------------
-            # Скрываем ненужные элементы (реклама, навигация и т.п.)
+            # -----------------------------------------------------------------
             if hide_selectors:
                 for selector in hide_selectors:
                     try:
@@ -248,64 +363,42 @@ def url2pdf(
                     except Exception:
                         click.echo(f"   ⚠️  Не удалось скрыть: {selector}")
 
-            # -------------------------------------------------------------
+            # -----------------------------------------------------------------
             # ГЕНЕРАЦИЯ PDF
-            # -------------------------------------------------------------
+            # -----------------------------------------------------------------
             click.echo(f"   Генерация PDF...")
 
-            if full_page:
-                # Режим полной страницы:
-                # - Playwright автоматически разбивает на страницы A4
-                # - Включены фоновые изображения
-                # - Без колонтитулов
-                # - С тегированием для доступности
-                pdf_bytes = page.pdf(
-                    path=str(output_path),
-                    format=format,
-                    landscape=landscape,
-                    print_background=True,  # Всегда включено для full-page
-                    margin={
-                        'top': margin_top,
-                        'bottom': margin_bottom,
-                        'left': margin_left,
-                        'right': margin_right,
-                    },
-                    prefer_css_page_size=True,  # Учитывать CSS @page
-                    display_header_footer=False,  # Без колонтитулов
-                    tagged=True,  # Доступный PDF с тегами
-                    scale=scale,  # Применить вычисленный масштаб
-                )
-            else:
-                # Обычный режим: только видимая область viewport
-                pdf_bytes = page.pdf(
-                    path=str(output_path),
-                    format=format,
-                    landscape=landscape,
-                    print_background=print_background,
-                    margin={
-                        'top': margin_top,
-                        'bottom': margin_bottom,
-                        'left': margin_left,
-                        'right': margin_right,
-                    },
-                    scale=scale,
-                )
+            margins = {
+                'top': margin_top,
+                'bottom': margin_bottom,
+                'left': margin_left,
+                'right': margin_right,
+            }
 
-            # Вывод успешного завершения
+            pdf_options = build_pdf_options(
+                format=format,
+                landscape=landscape,
+                print_background=print_background,
+                margins=margins,
+                scale=scale,
+                full_page=full_page,
+            )
+
+            pdf_bytes = page.pdf(path=str(output_path), **pdf_options)
+
             click.echo(f"✅ Готово! PDF сохранён: {output_path}")
             click.echo(f"   Размер: {output_path.stat().st_size / 1024:.1f} KB")
 
         except PlaywrightTimeout:
-            # Обработка таймаута загрузки
             click.echo(f"❌ Ошибка: Таймаут загрузки страницы ({timeout}мс)", err=True)
             raise click.Abort()
         except Exception as e:
-            # Обработка прочих ошибок
             click.echo(f"❌ Ошибка: {e}", err=True)
             raise click.Abort()
         finally:
-            # Закрываем браузер в любом случае (освобождение ресурсов)
-            browser.close()
+            # Закрываем браузер только если он был успешно создан
+            if browser is not None:
+                browser.close()
 
 
 # =============================================================================
