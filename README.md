@@ -28,9 +28,11 @@ playwright install
 - pip
 - Playwright (устанавливается через requirements.txt)
 
-## 🚀 Быстрый старт
+---
 
-### Базовое использование
+## 🚀 Версии
+
+### CLI-версия (командная строка)
 
 ```bash
 # Конвертировать страницу (сохранит в текущую директорию)
@@ -43,7 +45,21 @@ python url2pdf.py https://example.com -o output.pdf
 python url2pdf.py https://example.com --full-page
 ```
 
-## 📋 Опции
+### Web-версия (Streamlit)
+
+```bash
+# Запустить веб-интерфейс
+streamlit run streamlit_app.py
+
+# Или с указанием хоста и порта
+streamlit run streamlit_app.py --server.port 8501 --server.address 0.0.0.0
+```
+
+Откройте в браузере: `http://localhost:8501`
+
+---
+
+## 📋 Опции CLI
 
 | Опция | Краткая | Описание | По умолчанию |
 |-------|---------|----------|--------------|
@@ -57,8 +73,11 @@ python url2pdf.py https://example.com --full-page
 | `--margin-left` | — | Левое поле | 0.5cm |
 | `--margin-right` | — | Правое поле | 0.5cm |
 | `--timeout` | `-t` | Таймаут загрузки (мс) | 60000 (60 сек) |
+| `--image-timeout` | — | Ожидание изображений (мс) | 8000 (8 сек) |
 | `--hide-selectors` | — | CSS-селекторы для скрытия | — |
 | `--wait` | `-w` | Доп. ожидание перед генерацией (мс) | 1000 |
+
+---
 
 ## 📚 Примеры использования
 
@@ -116,6 +135,8 @@ python url2pdf.py https://heavy-site.com \
     -o heavy.pdf
 ```
 
+---
+
 ## ⚙️ Настройки по умолчанию
 
 | Параметр | Значение |
@@ -129,21 +150,25 @@ python url2pdf.py https://heavy-site.com \
 | **Фоновые изображения** | Включены |
 | **Колонтитулы** | Отключены |
 
+---
+
 ## 🔧 Как это работает
 
 1. **Запуск браузера**: Playwright запускает headless-версию Chromium
 2. **Загрузка страницы**: Переход по URL с ожиданием DOMContentLoaded
-3. **Ожидание контента**: 8 секунд на загрузку изображений (включая lazy-loading)
+3. **Ожидание контента**: Настройка времени для загрузки изображений (lazy-loading)
 4. **Применение стилей**: CSS для сохранения фонов при печати
 5. **Авто-масштабирование**: Вычисление ширины контента и подбор масштаба для A4
 6. **Генерация PDF**: Создание PDF с разбивкой на страницы
+
+---
 
 ## 🛠️ Решение проблем
 
 ### Изображения не загружаются
 Увеличьте время ожидания:
 ```bash
-python url2pdf.py https://example.com --full-page --timeout 90000
+python url2pdf.py https://example.com --full-page --image-timeout 15000
 ```
 
 ### Страница обрезается справа
@@ -167,13 +192,26 @@ python url2pdf.py https://example.com --full-page --scale 0.8
 python url2pdf.py https://slow-site.com --timeout 120000
 ```
 
+---
+
 ## 📁 Структура проекта
 
 ```
 url2pdf/
-├── url2pdf.py          # Основной скрипт
+├── url2pdf.py          # CLI-скрипт
+├── streamlit_app.py    # Web-интерфейс
 ├── requirements.txt    # Зависимости Python
 ├── README.md          # Документация
-├── venv/              # Виртуальное окружение
-└── *.pdf              # Сгенерированные PDF-файлы
+├── CLAUDE.md          # Руководство для Claude Code
+├── todo.md            # Список улучшений
+├── .gitignore         # Исключения Git
+└── venv/              # Виртуальное окружение
 ```
+
+---
+
+## 🔒 Безопасность
+
+- **SSRF защита**: Блокировка внутренних хостов (localhost, 127.0.0.1)
+- **Валидация схемы**: Разрешены только http/https
+- **Таймауты**: Защита от зависания на медленных сайтах
