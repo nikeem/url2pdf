@@ -269,8 +269,7 @@ with col2:
 paper_format = st.selectbox(
     "Формат бумаги",
     ['A4', 'Letter', 'Legal', 'Tabloid'],
-    index=0,
-    horizontal=True
+    index=0
 )
 
 # Поля
