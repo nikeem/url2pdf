@@ -398,5 +398,8 @@ st.markdown("""
 # Footer
 st.markdown("""
 ---
-<small>Powered by Playwright & Streamlit</small>
+<div style='text-align: center;'>
+    <small>Powered by Playwright & Streamlit</small><br>
+    <small style='color: gray;'>© 2025 Nikita Emelyanov | <a href='https://t.me/emelyanov_na' target='_blank'>t.me/emelyanov_na</a></small>
+</div>
 """, unsafe_allow_html=True)
