@@ -201,6 +201,7 @@ url2pdf/
 ├── url2pdf.py          # CLI-скрипт
 ├── streamlit_app.py    # Web-интерфейс
 ├── requirements.txt    # Зависимости Python
+├── packages.txt        # Системные зависимости (Linux/Streamlit Cloud)
 ├── README.md          # Документация
 ├── CLAUDE.md          # Руководство для Claude Code
 ├── todo.md            # Список улучшений
